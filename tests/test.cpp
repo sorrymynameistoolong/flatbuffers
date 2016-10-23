@@ -270,6 +270,9 @@ void AccessFlatBufferTest(const uint8_t *flatbuf, size_t length,
   // Checking for presence of fields:
   TEST_EQ(flatbuffers::IsFieldPresent(monster, Monster::VT_HP), true);
   TEST_EQ(flatbuffers::IsFieldPresent(monster, Monster::VT_MANA), false);
+
+  // Obtaining a buffer from a root:
+  TEST_EQ(GetBufferStartFromRootPointer(monster), flatbuf);
 }
 
 // Change a FlatBuffer in-place, after it has been constructed.
@@ -314,17 +317,34 @@ void MutateFlatBuffersTest(uint8_t *flatbuf, std::size_t length) {
 
 // Unpack a FlatBuffer into objects.
 void ObjectFlatBuffersTest(uint8_t *flatbuf) {
+  // Optional: we can specify resolver and rehasher functions to turn hashed
+  // strings into object pointers and back, to implement remote references
+  // and such.
+  auto resolver = flatbuffers::resolver_function_t(
+                    [](void **pointer_adr, flatbuffers::hash_value_t hash) {
+    (void)pointer_adr;
+    (void)hash;
+    // Don't actually do anything, leave variable null.
+  });
+  auto rehasher = flatbuffers::rehasher_function_t(
+                    [](void *pointer) -> flatbuffers::hash_value_t {
+    (void)pointer;
+    return 0;
+  });
+
   // Turn a buffer into C++ objects.
-  auto monster1 = GetMonster(flatbuf)->UnPack();
+  auto monster1 = UnPackMonster(flatbuf, &resolver);
 
   // Re-serialize the data.
   flatbuffers::FlatBufferBuilder fbb1;
-  fbb1.Finish(CreateMonster(fbb1, monster1.get()), MonsterIdentifier());
+  fbb1.Finish(CreateMonster(fbb1, monster1.get(), &rehasher),
+              MonsterIdentifier());
 
   // Unpack again, and re-serialize again.
-  auto monster2 = GetMonster(fbb1.GetBufferPointer())->UnPack();
+  auto monster2 = UnPackMonster(fbb1.GetBufferPointer(), &resolver);
   flatbuffers::FlatBufferBuilder fbb2;
-  fbb2.Finish(CreateMonster(fbb2, monster2.get()), MonsterIdentifier());
+  fbb2.Finish(CreateMonster(fbb2, monster2.get(), &rehasher),
+              MonsterIdentifier());
 
   // Now we've gone full round-trip, the two buffers should match.
   auto len1 = fbb1.GetSize();
@@ -383,6 +403,25 @@ void ObjectFlatBuffersTest(uint8_t *flatbuf) {
   TEST_EQ(tests[1].b(), 40);
 }
 
+// Prefix a FlatBuffer with a size field.
+void SizePrefixedTest() {
+  // Create size prefixed buffer.
+  flatbuffers::FlatBufferBuilder fbb;
+  fbb.FinishSizePrefixed(CreateMonster(fbb, 0, 200, 300,
+                                       fbb.CreateString("bob")));
+
+  // Verify it.
+  flatbuffers::Verifier verifier(fbb.GetBufferPointer(), fbb.GetSize());
+  TEST_EQ(verifier.VerifySizePrefixedBuffer<Monster>(nullptr), true);
+
+  // Access it.
+  auto m = flatbuffers::GetSizePrefixedRoot<MyGame::Example::Monster>(
+                                                        fbb.GetBufferPointer());
+  TEST_EQ(m->mana(), 200);
+  TEST_EQ(m->hp(), 300);
+  TEST_EQ_STR(m->name()->c_str(), "bob");
+}
+
 // example of parsing text straight into a buffer, and generating
 // text back from it:
 void ParseAndGenerateTextTest() {
@@ -410,7 +449,8 @@ void ParseAndGenerateTextTest() {
   // to ensure it is correct, we now generate text back from the binary,
   // and compare the two:
   std::string jsongen;
-  GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  auto result = GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  TEST_EQ(result, true);
 
   if (jsongen != jsonfile) {
     printf("%s----------------\n%s", jsongen.c_str(), jsonfile.c_str());
@@ -432,7 +472,7 @@ void ReflectionTest(uint8_t *flatbuf, size_t length) {
   // Make sure the schema is what we expect it to be.
   auto &schema = *reflection::GetSchema(bfbsfile.c_str());
   auto root_table = schema.root_table();
-  TEST_EQ_STR(root_table->name()->c_str(), "Monster");
+  TEST_EQ_STR(root_table->name()->c_str(), "MyGame.Example.Monster");
   auto fields = root_table->fields();
   auto hp_field_ptr = fields->LookupByKey("hp");
   TEST_NOTNULL(hp_field_ptr);
@@ -444,6 +484,14 @@ void ReflectionTest(uint8_t *flatbuf, size_t length) {
   TEST_NOTNULL(friendly_field_ptr);
   TEST_NOTNULL(friendly_field_ptr->attributes());
   TEST_NOTNULL(friendly_field_ptr->attributes()->LookupByKey("priority"));
+
+  // Make sure the table index is what we expect it to be.
+  auto pos_field_ptr = fields->LookupByKey("pos");
+  TEST_NOTNULL(pos_field_ptr);
+  TEST_EQ(pos_field_ptr->type()->base_type(), reflection::Obj);
+  auto pos_table_ptr = schema.objects()->Get(pos_field_ptr->type()->index());
+  TEST_NOTNULL(pos_table_ptr);
+  TEST_EQ_STR(pos_table_ptr->name()->c_str(), "MyGame.Example.Vec3");
 
   // Now use it to dynamically access a buffer.
   auto &root = *flatbuffers::GetAnyRoot(flatbuf);
@@ -827,7 +875,8 @@ void FuzzTest2() {
 
   std::string jsongen;
   parser.opts.indent_step = 0;
-  GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  auto result = GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  TEST_EQ(result, true);
 
   if (jsongen != json) {
     // These strings are larger than a megabyte, so we show the bytes around
@@ -987,7 +1036,8 @@ void UnicodeTest() {
           true);
   std::string jsongen;
   parser.opts.indent_step = -1;
-  GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  auto result = GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  TEST_EQ(result, true);
   TEST_EQ(jsongen,
           std::string(
             "{F: \"\\u20AC\\u00A2\\u30E6\\u30FC\\u30B6\\u30FC"
@@ -1003,11 +1053,29 @@ void UnicodeTestAllowNonUTF8() {
                        "\\u5225\\u30B5\\u30A4\\u30C8\\x01\\x80\\u0080\\uD83D\\uDE0E\" }"), true);
   std::string jsongen;
   parser.opts.indent_step = -1;
-  GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  auto result = GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  TEST_EQ(result, true);
   TEST_EQ(jsongen,
           std::string(
             "{F: \"\\u20AC\\u00A2\\u30E6\\u30FC\\u30B6\\u30FC"
             "\\u5225\\u30B5\\u30A4\\u30C8\\u0001\\x80\\u0080\\uD83D\\uDE0E\"}"));
+}
+
+void UnicodeTestGenerateTextFailsOnNonUTF8() {
+  flatbuffers::Parser parser;
+  // Allow non-UTF-8 initially to model what happens when we load a binary flatbuffer from disk
+  // which contains non-UTF-8 strings.
+  parser.opts.allow_non_utf8 = true;
+  TEST_EQ(parser.Parse("table T { F:string; }"
+                       "root_type T;"
+                       "{ F:\"\\u20AC\\u00A2\\u30E6\\u30FC\\u30B6\\u30FC"
+                       "\\u5225\\u30B5\\u30A4\\u30C8\\x01\\x80\\u0080\\uD83D\\uDE0E\" }"), true);
+  std::string jsongen;
+  parser.opts.indent_step = -1;
+  // Now, disallow non-UTF-8 (the default behavior) so GenerateText indicates failure.
+  parser.opts.allow_non_utf8 = false;
+  auto result = GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  TEST_EQ(result, false);
 }
 
 void UnicodeSurrogatesTest() {
@@ -1157,7 +1225,8 @@ void UnknownFieldsTest() {
 
   std::string jsongen;
   parser.opts.indent_step = -1;
-  GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  auto result = GenerateText(parser, parser.builder_.GetBufferPointer(), &jsongen);
+  TEST_EQ(result, true);
   TEST_EQ(jsongen == "{str: \"test\",i: 10}", true);
 }
 
@@ -1207,6 +1276,8 @@ int main(int /*argc*/, const char * /*argv*/[]) {
 
   ObjectFlatBuffersTest(flatbuf.get());
 
+  SizePrefixedTest();
+
   #ifndef FLATBUFFERS_NO_FILE_TESTS
   ParseAndGenerateTextTest();
   ReflectionTest(flatbuf.get(), rawbuf.length());
@@ -1222,6 +1293,7 @@ int main(int /*argc*/, const char * /*argv*/[]) {
   IntegerOutOfRangeTest();
   UnicodeTest();
   UnicodeTestAllowNonUTF8();
+  UnicodeTestGenerateTextFailsOnNonUTF8();
   UnicodeSurrogatesTest();
   UnicodeInvalidSurrogatesTest();
   InvalidUTF8Test();

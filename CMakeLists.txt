@@ -12,6 +12,9 @@ option(FLATBUFFERS_BUILD_FLATC "Enable the build of the flatbuffers compiler"
        ON)
 option(FLATBUFFERS_BUILD_FLATHASH "Enable the build of flathash" ON)
 option(FLATBUFFERS_BUILD_GRPCTEST "Enable the build of grpctest" OFF)
+option(FLATBUFFERS_BUILD_SHAREDLIB
+       "Enable the build of the flatbuffers shared library"
+       OFF)
 
 if(NOT FLATBUFFERS_BUILD_FLATC AND FLATBUFFERS_BUILD_TESTS)
     message(WARNING
@@ -44,6 +47,7 @@ set(FlatBuffers_Compiler_SRCS
   src/idl_gen_fbs.cpp
   src/idl_gen_grpc.cpp
   src/flatc.cpp
+  grpc/src/compiler/schema_interface.h
   grpc/src/compiler/cpp_generator.h
   grpc/src/compiler/cpp_generator.cc
 )
@@ -95,7 +99,10 @@ set(FlatBuffers_GRPCTest_SRCS
 # source_group(Compiler FILES ${FlatBuffers_Compiler_SRCS})
 # source_group(Tests FILES ${FlatBuffers_Tests_SRCS})
 
-if(APPLE)
+if(EXISTS "${CMAKE_TOOLCHAIN_FILE}")
+  # do not apply any global settings if the toolchain
+  # is being configured externally
+elseif(APPLE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -stdlib=libc++")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -pedantic -Werror -Wextra")
 elseif(CMAKE_COMPILER_IS_GNUCXX)
@@ -110,7 +117,8 @@ elseif(CMAKE_COMPILER_IS_GNUCXX)
     "${CMAKE_CXX_FLAGS} -Wall -pedantic -Werror -Wextra -Werror=shadow")
   if (GCC_VERSION VERSION_GREATER 4.4)
     set(CMAKE_CXX_FLAGS
-      "${CMAKE_CXX_FLAGS} -Wunused-result -Werror=unused-result")
+      "${CMAKE_CXX_FLAGS} -Wunused-result -Werror=unused-result \
+                          -Wunused-parameter -Werror=unused-parameter")
   endif()
 
   # Certain platforms such as ARM do not use signed chars by default
@@ -118,7 +126,7 @@ elseif(CMAKE_COMPILER_IS_GNUCXX)
   set(CMAKE_CXX_FLAGS
     "${CMAKE_CXX_FLAGS} -fsigned-char")
 
-elseif("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+elseif(${CMAKE_CXX_COMPILER_ID} MATCHES "Clang")
   set(CMAKE_CXX_FLAGS
       "${CMAKE_CXX_FLAGS} -std=c++0x -stdlib=libc++ -Wall -pedantic -Werror \
                           -Wextra")
@@ -161,6 +169,11 @@ endif()
 
 if(FLATBUFFERS_BUILD_FLATHASH)
   add_executable(flathash ${FlatHash_SRCS})
+endif()
+
+if(FLATBUFFERS_BUILD_SHAREDLIB)
+  add_library(flatbuffers_shared SHARED ${FlatBuffers_Library_SRCS})
+  set_target_properties(flatbuffers_shared PROPERTIES OUTPUT_NAME flatbuffers)
 endif()
 
 function(compile_flatbuffers_schema_to_cpp SRC_FBS)
@@ -211,6 +224,9 @@ if(FLATBUFFERS_INSTALL)
   if(FLATBUFFERS_BUILD_FLATC)
     install(TARGETS flatc DESTINATION bin)
   endif()
+  if(FLATBUFFERS_BUILD_SHAREDLIB)
+    install(TARGETS flatbuffers_shared DESTINATION lib)
+  endif()
 endif()
 
 if(FLATBUFFERS_BUILD_TESTS)
@@ -222,3 +238,7 @@ if(FLATBUFFERS_BUILD_TESTS)
 endif()
 
 include(CMake/BuildFlatBuffers.cmake)
+
+if(FLATBUFFERS_PACKAGE_DEBIAN)
+    include(CMake/PackageDebian.cmake)
+endif()
